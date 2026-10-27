@@ -25,6 +25,11 @@ public class DetectionController {
         return purpleLoopService.getEvents();
     }
 
+    @GetMapping("/alerts")
+    public List<DetectionResult> getAlerts() {
+        return purpleLoopService.getAlerts();
+    }
+
     @PostMapping("/simulate/brute-force")
     public List<DetectionResult> simulateBruteForce() {
         return purpleLoopService.simulateBruteForce();

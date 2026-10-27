@@ -32,11 +32,16 @@ import {
 } from 'recharts'
 import './App.css'
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
+
+const buildApiUrl = (path) => `${API_BASE_URL}${path}`
+
 const API = {
-  health: '/api/health',
-  metrics: '/api/metrics',
-  events: '/api/events',
-  simulate: '/api/simulate/brute-force',
+  health: buildApiUrl('/api/health'),
+  metrics: buildApiUrl('/api/metrics'),
+  events: buildApiUrl('/api/events'),
+  alerts: buildApiUrl('/api/alerts'),
+  simulate: buildApiUrl('/api/simulate/brute-force'),
 }
 
 const activityData = [
@@ -115,15 +120,16 @@ function App() {
       await fetchJson(API.health)
       setHealth('online')
 
-      const [metricsData, eventsData] = await Promise.all([
-        fetchJson(API.metrics),git status
+      const [metricsData, eventsData, alertsData] = await Promise.all([
+        fetchJson(API.metrics),
         fetchJson(API.events),
+        fetchJson(API.alerts),
       ])
 
       setMetrics(metricsData)
       setEvents(Array.isArray(eventsData) ? eventsData : [])
+      setAlerts(Array.isArray(alertsData) ? alertsData : [])
 
-      
       setLastUpdated(new Date())
     } catch (err) {
       setHealth('offline')
@@ -154,13 +160,15 @@ function App() {
       const detectionResults = Array.isArray(results) ? results : []
       setAlerts(detectionResults)
 
-      const [metricsData, eventsData] = await Promise.all([
+      const [metricsData, eventsData, alertsData] = await Promise.all([
         fetchJson(API.metrics),
         fetchJson(API.events),
+        fetchJson(API.alerts),
       ])
 
       setMetrics(metricsData)
       setEvents(Array.isArray(eventsData) ? eventsData : [])
+      setAlerts(Array.isArray(alertsData) ? alertsData : [])
       setLastUpdated(new Date())
 
       if (detectionResults.length > 0) {

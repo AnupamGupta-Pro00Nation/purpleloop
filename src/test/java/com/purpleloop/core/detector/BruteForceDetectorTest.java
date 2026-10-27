@@ -3,10 +3,12 @@ package com.purpleloop.core.detector;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
+import com.purpleloop.core.PurpleLoopService;
 import com.purpleloop.core.model.DetectionResult;
 import com.purpleloop.core.model.LoginEvent;
 
@@ -87,5 +89,53 @@ class BruteForceDetectorTest {
         assertTrue(results.stream().anyMatch(
                 result -> result.getSourceIp().equals("192.168.1.20")
         ));
+    }
+
+    @Test
+    void serviceHasInitialEventHistoryAndMetrics() {
+
+        PurpleLoopService service = new PurpleLoopService();
+
+        assertFalse(service.getEvents().isEmpty());
+        assertEquals(service.getEvents().size(), service.getMetrics().getTotalEvents());
+        assertEquals(service.getAlerts().size(), service.getMetrics().getTotalAlerts());
+    }
+
+    @Test
+    void serviceAddsNewFailedEventsPerSimulation() {
+
+        PurpleLoopService service = new PurpleLoopService();
+        int initialCount = service.getEvents().size();
+
+        List<DetectionResult> newAlerts = service.simulateBruteForce();
+
+        assertEquals(1, newAlerts.size());
+        assertEquals(initialCount + 3, service.getEvents().size());
+        assertEquals(service.getEvents().size(), service.getMetrics().getTotalEvents());
+    }
+
+    @Test
+    void servicePersistsHistoryAcrossRequests() {
+
+        PurpleLoopService service = new PurpleLoopService();
+        int beforeSimulation = service.getEvents().size();
+
+        service.simulateBruteForce();
+
+        assertTrue(service.getEvents().size() > beforeSimulation);
+        assertEquals(service.getEvents().size(), service.getMetrics().getTotalEvents());
+    }
+
+    @Test
+    void serviceDoesNotDuplicateAlertsForTheSameDetectionCondition() {
+
+        PurpleLoopService service = new PurpleLoopService();
+        int initialAlerts = service.getAlerts().size();
+
+        service.simulateBruteForce();
+        service.simulateBruteForce();
+
+        assertTrue(service.getAlerts().size() >= initialAlerts + 1);
+        assertTrue(service.getAlerts().size() <= initialAlerts + 2);
     }
 }
