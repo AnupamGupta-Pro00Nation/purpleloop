@@ -1,52 +1,59 @@
 package com.purpleloop.core;
 
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import com.purpleloop.core.detector.BruteForceDetector;
+import com.purpleloop.core.model.DetectionResult;
 import com.purpleloop.core.model.LoginEvent;
 
 public class PurpleLoopApp {
+
     public static void main(String[] args) {
 
-        // Create the first login event
-        LoginEvent event1 = new LoginEvent();
-        event1.ip = "192.168.1.10";
-        event1.success = false;
+        // Simulated authentication telemetry
+        List<LoginEvent> events = List.of(
+                new LoginEvent("192.168.1.10", false),
+                new LoginEvent("192.168.1.10", false),
+                new LoginEvent("192.168.1.20", true),
+                new LoginEvent("192.168.1.10", false),
+                new LoginEvent("192.168.1.10", false),
+                new LoginEvent("192.168.1.10", false)
+        );
 
-        // Create the second login event
-        LoginEvent event2 = new LoginEvent();
-        event2.ip = "192.168.1.10";
-        event2.success = false;
+        System.out.println("PurpleLoop Detection Engine");
+        System.out.println("---------------------------");
+        System.out.println(
+                "Events received: " + events.size()
+        );
 
-        // Create the third login event
-        LoginEvent event3 = new LoginEvent();
-        event3.ip = "192.168.1.20";
-        event3.success = true;
-
-        // Create the fourth login event
-        LoginEvent event4 = new LoginEvent();
-        event4.ip = "192.168.1.10";
-        event4.success = false;
-
-        // Store all events in an array
-        LoginEvent[] events = {event1, event2, event3, event4};
-
-        int count = 0;
-
-        // Examine every login event
-        for (int i = 0; i < events.length; i++) {
-
-            if (events[i].success == false) {
-                count++;
-
-                System.out.println(
-                    "Failed login from IP: " + events[i].ip
-                );
-            } else {
-                System.out.println(
-                    "Successful login from IP: " + events[i].ip
-                );
-            }
+        BruteForceDetector detector = new BruteForceDetector(3);
+        List<DetectionResult> results = detector.analyze(events);
+        for (DetectionResult result : results) {
+            System.out.println("=== SECURITY ALERT ===");
+            System.out.println("Rule: " + result.getRuleName());
+            System.out.println("Source IP: " + result.getSourceIp());
+            System.out.println("Failed Attempts: " + result.getFailedAttempts());
+            System.out.println("Severity: " + result.getSeverity());
+            System.out.println("MITRE ATT&CK: " + result.getMitreTechnique());
+            System.out.println("======================");
         }
-        System.out.println("-----------------------------");
-        System.out.println("Total login attempts: " + events.length);
-        System.out.println("Failed login attempts: " + count);
+        System.out.println();
+        Set<String> uniqueIps = results.stream()
+            .map(DetectionResult::getSourceIp)
+            .collect(Collectors.toSet());
+
+        DetectionMetrics metrics = new DetectionMetrics(
+                events.size(),
+            results.size(),
+            uniqueIps.size()
+        );
+
+        System.out.println();
+        System.out.println("=== Detection Summary ===");
+        System.out.println("Total events analyzed: " + metrics.getTotalEvents());
+        System.out.println("Total alerts generated: " + metrics.getTotalAlerts());
+        System.out.println("Unique source IPs detected: " + metrics.getUniqueSourceIps());
     }
 }
