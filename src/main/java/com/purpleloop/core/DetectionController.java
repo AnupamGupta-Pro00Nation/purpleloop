@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.purpleloop.core.model.DetectionResult;
+import com.purpleloop.core.model.DetectionRule;
 import com.purpleloop.core.model.LoginEvent;
 
 @RestController
@@ -35,8 +36,18 @@ public class DetectionController {
         return purpleLoopService.simulateBruteForce();
     }
 
+    @PostMapping("/simulate/distributed-brute-force")
+    public List<DetectionResult> simulateDistributedBruteForce() {
+        return purpleLoopService.simulateDistributedBruteForce();
+    }
+
     @GetMapping("/metrics")
     public DetectionMetrics getMetrics() {
         return purpleLoopService.getMetrics();
+    }
+
+    @GetMapping("/rules")
+    public List<DetectionRule> getRules() {
+        return purpleLoopService.getRules();
     }
 }

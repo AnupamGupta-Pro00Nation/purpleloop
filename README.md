@@ -1,6 +1,6 @@
 # PurpleLoop
 
-PurpleLoop is a purple-team simulation and detection-engineering dashboard built with Spring Boot and React. It models a controlled brute-force attack workflow, stores synthetic authentication telemetry in memory, evaluates a threshold-based detection rule, and visualizes current metrics, alert history, and MITRE ATT&CK mapping.
+PurpleLoop is a purple-team simulation and detection-engineering dashboard built with Spring Boot and React. It models controlled single-source and distributed brute-force workflows, stores synthetic authentication telemetry in memory, evaluates time-windowed detection rules, and visualizes metrics, alert history, and MITRE ATT&CK mappings.
 
 ## Architecture
 
@@ -11,9 +11,14 @@ flowchart LR
     API --> Service[PurpleLoopService]
     Service --> Events[In-memory Event History]
     Service --> Alerts[In-memory Alert History]
-    Service --> Detector[BruteForceDetector]
-    Detector --> Results[DetectionResult]
-    Results --> Dashboard[Overview, Events, Detections, MITRE]
+    Service --> Rules[Detection Rule Catalog]
+    Service --> Single[BruteForceDetector]
+    Service --> Distributed[DistributedBruteForceDetector]
+    Config[DetectionProperties] --> Single
+    Config --> Distributed
+    Single --> Results[DetectionResult]
+    Distributed --> Results
+    Results --> Dashboard[Metrics, Alerts, Rules, MITRE]
 ```
 
 ## Project Overview
@@ -21,8 +26,10 @@ flowchart LR
 This project demonstrates:
 - Java + Spring Boot REST API design
 - Authentication telemetry generation and retention
-- Threshold-based behavioral detection
-- MITRE ATT&CK mapping for T1110 (Brute Force)
+- Stateful, time-windowed detection across processing batches
+- Single-source and distributed brute-force detection
+- Detection rule metadata and MITRE ATT&CK mapping for T1110 (Brute Force)
+- Event, alert-category, login-outcome, and MTTD metrics
 - React-driven dashboard integration
 - Unit testing and production build validation
 
@@ -30,35 +37,43 @@ This project demonstrates:
 
 - Synthetic failed-login event generation with realistic timestamps
 - In-memory event history retained while the backend process remains running
-- Brute-force detection at a threshold of 3 failed attempts per source IP
-- Alert storage, deduplication, and metrics calculation
+- Single-source detection at 3 failed attempts per IP within a 5-minute window by default
+- Distributed detection at 6 failures from at least 3 IPs against the same account within that window
+- Episode-based alert deduplication, with a new alert after the prior episode expires
+- Stable event IDs and per-detector replay suppression within the active detection window
+- Configurable rolling simulation rate limit and bounded event/alert history with oldest-first eviction
+- Synthetic distributed attack simulation from multiple IPs against a shared target account
+- Rule identifiers, descriptions, severity, status, and ATT&CK mapping available through the API
 - Dashboard for overview metrics, events, detections, and MITRE technique mapping
 - Simulation triggered only by the user clicking the dashboard button
 - Local development and Render/Vercel deployment preparation
 
 ## Detection Logic
 
-The core detector groups failed authentication events by source IP and increments a counter for each failed attempt. When the threshold reaches 3 failed logins for a given IP, the detector emits a `DetectionResult` with:
+`BruteForceDetector` retains timestamped failed login attempts by source IP, prunes attempts outside the configured window, and emits one alert when a source reaches its threshold. Further failures do not produce duplicate alerts for that episode; after the episode expires, a new threshold crossing can alert again. Valid event timestamps are ordered so delayed events still count when they remain inside the window. Successful logins never increment failure totals.
 
-- ruleName: `Repeated Failed Logins`
-- sourceIp: offending source address
-- failedAttempts: actual failed-attempt count at the threshold
-- severity: `HIGH`
-- mitreTechnique: `T1110`
+`DistributedBruteForceDetector` applies a separate threshold per target account and requires both a minimum failure count and a minimum number of distinct source IPs. Its current behavior maps to **T1110 — Brute Force**. It does not claim **T1110.003 — Password Spraying**: events do not include password evidence, and distributed attempts against one account alone do not establish password spraying.
 
-Successful logins do not count toward the failed-attempt total. Alert deduplication prevents identical repeated detections from being added multiple times for the same condition in the retained in-memory alert list.
+Alerts preserve the original `ruleName`, `sourceIp`, `failedAttempts`, `severity`, and `mitreTechnique` fields and add a unique ID, rule ID, source IP list, target account, detection/episode timestamps, and a descriptive message. MTTD is the average alert timestamp minus episode-start timestamp for alerts with valid nonnegative timestamps; it is zero when no measurable alerts exist.
+
+Simulation endpoints share an in-memory rolling rate limit (default 20 requests per minute). Event and alert histories are also bounded in memory (defaults: 10,000 events and 5,000 alerts); oldest records are evicted first and metrics describe retained history. Event IDs are deduplicated by each detector only while they remain within its active time window. Rate-limit counters, history, and idempotency state are process-local: restarts reset them, and separate replicas do not coordinate them. These controls are not substitutes for shared rate limiting, authentication, durable storage, or pagination in a multi-instance deployment.
 
 ## API Endpoints
 
 - `GET /api/health` — backend health status
 - `GET /api/events` — current in-memory event history
 - `GET /api/alerts` — current in-memory alert history
-- `GET /api/metrics` — total events, total alerts, and unique source IPs
+- `GET /api/metrics` — event/alert totals, unique IPs, failed and successful login counts, alert categories, and mean time to detect in milliseconds
+- `GET /api/rules` — detection rule metadata and enabled/disabled status
 - `POST /api/simulate/brute-force` — generates new failed-login telemetry, records it, runs detection, and returns newly generated alerts
+- `POST /api/simulate/distributed-brute-force` — generates failures from multiple IPs against one synthetic account and returns newly generated alerts
+- Simulation requests exceeding the configured rolling limit return HTTP `429 Too Many Requests`.
+
+The original `/api/health`, `/api/events`, `/api/alerts`, `/api/metrics`, and `/api/simulate/brute-force` routes remain available.
 
 ## Technologies Used
 
-- Java 21
+- Java 25 (LTS)
 - Spring Boot 3.5.6
 - Maven
 - React 19
@@ -68,7 +83,7 @@ Successful logins do not count toward the failed-attempt total. Alert deduplicat
 
 ## Prerequisites
 
-- Java 21 or newer
+- Java 25 (LTS)
 - Maven 3.9+
 - Node.js 20.19+ or 22.12+ and npm
 
@@ -106,6 +121,17 @@ npm run dev -- --host 0.0.0.0
 
 Environment variables:
 
+- Detection configuration (can also be set in `application.properties`):
+  - `PURPLELOOP_DETECTION_BRUTE_FORCE_FAILURE_THRESHOLD` (default `3`, must be at least `1`)
+  - `PURPLELOOP_DETECTION_WINDOW` (default `PT5M`, a positive ISO-8601 duration)
+  - `PURPLELOOP_DETECTION_DISTRIBUTED_FAILURE_THRESHOLD` (default `6`, must be at least `1`)
+  - `PURPLELOOP_DETECTION_MINIMUM_DISTINCT_SOURCE_IPS` (default `3`, must be at least `2`)
+  - `PURPLELOOP_DETECTION_BRUTE_FORCE_ENABLED` (default `true`)
+  - `PURPLELOOP_DETECTION_DISTRIBUTED_ENABLED` (default `true`)
+  - `PURPLELOOP_DETECTION_SIMULATION_RATE_LIMIT` (default `20`, between `1` and `10000` requests)
+  - `PURPLELOOP_DETECTION_SIMULATION_RATE_WINDOW` (default `PT1M`, a positive ISO-8601 duration)
+  - `PURPLELOOP_DETECTION_MAX_EVENT_HISTORY_SIZE` (default `10000`, between `1` and `1000000`)
+  - `PURPLELOOP_DETECTION_MAX_ALERT_HISTORY_SIZE` (default `5000`, between `1` and `1000000`)
 - Frontend (Vite): `VITE_API_BASE_URL`
   - Required on Vercel; set it to the backend base URL, such as `https://your-service.onrender.com`.
   - Optional locally; if unset, Vite's `/api` proxy forwards requests to `http://localhost:8080`.
@@ -120,20 +146,21 @@ Run backend tests:
 
 ```bash
 mvn clean test
+mvn clean package
 ```
 
 Run the frontend production build:
 
 ```bash
-cd frontend
-npm run build
+npm --prefix frontend run build
+npm --prefix frontend run lint
 ```
 
 ## Deployment
 
 ### Backend on Render
 
-A Render Blueprint is provided in `render.yaml`. It deploys the Spring Boot backend as a Docker web service because Render's native runtimes do not include Java. The root `Dockerfile` builds the application with Maven and Java 21, then runs the generated Spring Boot JAR with a Java 21 runtime.
+A Render Blueprint is provided in `render.yaml`. It deploys the Spring Boot backend as a Docker web service because Render's native runtimes do not include Java. The root `Dockerfile` builds the application with Maven and Java 25, then runs the generated Spring Boot JAR with a Java 25 runtime.
 
 Deployment settings:
 - Root Directory: repository root (`.`)
@@ -179,13 +206,19 @@ Deployment instructions describe configuration only; no live deployment is claim
 
 - Event and alert history are retained in backend memory only while the Spring Boot process remains running.
 - A backend restart resets the in-memory state.
+- Detection attempt state, events, and alerts are in-memory and local to one application process; the detectors are not distributed across backend replicas.
+- Simulation rate limiting is process-local and can be bypassed across multiple backend replicas; it is not a replacement for an edge/API gateway limit.
+- Event replay suppression is also in-memory and covers IDs retained in the active detection window; it is not durable, cross-replica idempotency.
+- History limits bound memory use by evicting oldest events and alerts, so metrics and API history cover retained records only.
+- Synthetic authentication events contain no passwords or password hashes, so password spraying cannot be inferred or mapped to T1110.003.
+- Distributed simulation generates enough distinct synthetic IPv4 addresses for the configured IP threshold, up to 65,536; it is controlled demonstration data, not production attack telemetry.
 - This is a controlled simulation platform and not a production SIEM or detection system.
 - Free hosting platforms may sleep or restart the service without notice.
 
 ## Future Improvements
 
 - Persistent storage with PostgreSQL or SQLite
-- More detection rules beyond brute-force detection
+- More detection rules and validated ATT&CK mappings
 - Realistic alert lifecycle states such as open, acknowledged, resolved
 - Authentication and authorization for the portal
 - CI/CD pipeline and release automation

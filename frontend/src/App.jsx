@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -18,19 +25,13 @@ import {
   ShieldAlert,
   ShieldCheck,
   Terminal,
+  Users,
   Wifi,
   XCircle,
 } from 'lucide-react'
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts'
 import './App.css'
+
+const ActivityChart = lazy(() => import('./ActivityChart.jsx'))
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
 
@@ -42,17 +43,9 @@ const API = {
   events: buildApiUrl('/api/events'),
   alerts: buildApiUrl('/api/alerts'),
   simulate: buildApiUrl('/api/simulate/brute-force'),
+  simulateDistributed: buildApiUrl('/api/simulate/distributed-brute-force'),
+  rules: buildApiUrl('/api/rules'),
 }
-
-const activityData = [
-  { time: '00:00', events: 2 },
-  { time: '04:00', events: 4 },
-  { time: '08:00', events: 3 },
-  { time: '12:00', events: 7 },
-  { time: '16:00', events: 5 },
-  { time: '20:00', events: 9 },
-  { time: '23:59', events: 6 },
-]
 
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, options)
@@ -107,30 +100,58 @@ function App() {
   const [metrics, setMetrics] = useState(null)
   const [events, setEvents] = useState([])
   const [alerts, setAlerts] = useState([])
+  const [rules, setRules] = useState([])
   const [loading, setLoading] = useState(true)
   const [simulating, setSimulating] = useState(false)
   const [error, setError] = useState('')
+  const [rulesError, setRulesError] = useState('')
   const [simulationMessage, setSimulationMessage] = useState('')
   const [lastUpdated, setLastUpdated] = useState(null)
+  const [shouldLoadChart, setShouldLoadChart] = useState(false)
+  const chartContainerRef = useRef(null)
 
-  const loadDashboard = useCallback(async () => {
-    setError('')
-
-    try {
-      await fetchJson(API.health)
-      setHealth('online')
-
-      const [metricsData, eventsData, alertsData] = await Promise.all([
+  const loadDashboardData = useCallback(async () => {
+    const [metricsResult, eventsResult, alertsResult, rulesResult] =
+      await Promise.allSettled([
         fetchJson(API.metrics),
         fetchJson(API.events),
         fetchJson(API.alerts),
+        fetchJson(API.rules),
       ])
 
-      setMetrics(metricsData)
-      setEvents(Array.isArray(eventsData) ? eventsData : [])
-      setAlerts(Array.isArray(alertsData) ? alertsData : [])
+    const failures = []
+    if (metricsResult.status === 'fulfilled') {
+      setMetrics(metricsResult.value)
+    } else {
+      failures.push(metricsResult.reason)
+    }
+    if (eventsResult.status === 'fulfilled') {
+      setEvents(Array.isArray(eventsResult.value) ? eventsResult.value : [])
+    } else {
+      failures.push(eventsResult.reason)
+    }
+    if (alertsResult.status === 'fulfilled') {
+      setAlerts(Array.isArray(alertsResult.value) ? alertsResult.value : [])
+    } else {
+      failures.push(alertsResult.reason)
+    }
+    if (rulesResult.status === 'fulfilled') {
+      setRules(Array.isArray(rulesResult.value) ? rulesResult.value : [])
+      setRulesError('')
+    } else {
+      setRules([])
+      setRulesError(`Detection rules unavailable: ${rulesResult.reason.message}`)
+    }
 
-      setLastUpdated(new Date())
+    setError(failures.length > 0 ? failures[0].message : '')
+    setLastUpdated(new Date())
+  }, [])
+
+  const loadDashboard = useCallback(async () => {
+    try {
+      await fetchJson(API.health)
+      setHealth('online')
+      await loadDashboardData()
     } catch (err) {
       setHealth('offline')
       setError(
@@ -139,43 +160,59 @@ function App() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [loadDashboardData])
 
-  useEffect(() => {
-    loadDashboard()
+  const refreshDashboard = useCallback(() => {
+    setError('')
+    void loadDashboard()
   }, [loadDashboard])
 
-  async function runSimulation() {
+  useEffect(() => {
+    void Promise.resolve().then(loadDashboard)
+  }, [loadDashboard])
+
+  useEffect(() => {
+    const chartContainer = chartContainerRef.current
+    if (!chartContainer) return
+
+    if (typeof IntersectionObserver === 'undefined') {
+      void Promise.resolve().then(() => setShouldLoadChart(true))
+      return
+    }
+
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) {
+        setShouldLoadChart(true)
+        observer.disconnect()
+      }
+    }, { rootMargin: '200px' })
+
+    observer.observe(chartContainer)
+    return () => observer.disconnect()
+  }, [])
+
+  async function runSimulation(endpoint = API.simulate, attackType = 'brute-force') {
     if (simulating) return
 
     setSimulating(true)
     setError('')
-    setSimulationMessage('Running brute-force simulation...')
+    setSimulationMessage(`Running ${attackType} simulation...`)
 
     try {
-      const results = await fetchJson(API.simulate, {
+      const results = await fetchJson(endpoint, {
         method: 'POST',
       })
 
       const detectionResults = Array.isArray(results) ? results : []
       setAlerts(detectionResults)
 
-      const [metricsData, eventsData, alertsData] = await Promise.all([
-        fetchJson(API.metrics),
-        fetchJson(API.events),
-        fetchJson(API.alerts),
-      ])
-
-      setMetrics(metricsData)
-      setEvents(Array.isArray(eventsData) ? eventsData : [])
-      setAlerts(Array.isArray(alertsData) ? alertsData : [])
-      setLastUpdated(new Date())
+      await loadDashboardData()
 
       if (detectionResults.length > 0) {
         const count = detectionResults.length
 
         setSimulationMessage(
-          `Simulation complete: ${count} detection alert${count === 1 ? '' : 's'} generated.`,
+          `${attackType} simulation complete: ${count} detection alert${count === 1 ? '' : 's'} generated.`,
         )
       } else {
         setSimulationMessage(
@@ -296,7 +333,7 @@ function App() {
 
             <button
               className="icon-button"
-              onClick={loadDashboard}
+              onClick={refreshDashboard}
               title="Refresh dashboard"
               aria-label="Refresh dashboard"
               disabled={loading}
@@ -323,19 +360,28 @@ function App() {
             </p>
           </div>
 
-          <button
-            className="primary-button"
-            onClick={runSimulation}
-            disabled={simulating || health !== 'online'}
-          >
-            {simulating ? (
-              <LoaderCircle size={17} className="spin" />
-            ) : (
-              <Play size={17} fill="currentColor" />
-            )}
-
-            {simulating ? 'Running Simulation...' : 'Run Attack Simulation'}
-          </button>
+          <div className="simulation-actions">
+            <button
+              className="primary-button"
+              onClick={() => runSimulation()}
+              disabled={simulating || health !== 'online'}
+            >
+              {simulating ? (
+                <LoaderCircle size={17} className="spin" />
+              ) : (
+                <Play size={17} fill="currentColor" />
+              )}
+              {simulating ? 'Running Simulation...' : 'Run Attack Simulation'}
+            </button>
+            <button
+              className="secondary-button"
+              onClick={() => runSimulation(API.simulateDistributed, 'distributed brute-force')}
+              disabled={simulating || health !== 'online'}
+            >
+              <Users size={16} />
+              Distributed Attack
+            </button>
+          </div>
         </section>
 
         {error && (
@@ -353,7 +399,7 @@ function App() {
 
         {simulationMessage && (
           <div
-            className={`alert-banner ${simulationMessage.startsWith('Simulation complete')
+            className={`alert-banner ${simulationMessage.includes('simulation complete')
                 ? 'success-banner'
                 : 'info-banner'
               }`}
@@ -403,10 +449,38 @@ function App() {
 
           <MetricCard
             title="Failed Logins"
-            value={failedLogins}
+            value={metrics?.totalFailedLogins ?? failedLogins}
             description="Failed authentication events"
             icon={Fingerprint}
             accent="orange"
+          />
+          <MetricCard
+            title="Successful Logins"
+            value={metrics?.totalSuccessfulLogins}
+            description="Successful authentication events"
+            icon={ShieldCheck}
+            accent="blue"
+          />
+          <MetricCard
+            title="Brute-Force Alerts"
+            value={metrics?.bruteForceAlerts}
+            description="Single-source detections"
+            icon={ShieldAlert}
+            accent="red"
+          />
+          <MetricCard
+            title="Distributed Alerts"
+            value={metrics?.distributedAttackAlerts}
+            description="Multi-source account detections"
+            icon={Users}
+            accent="orange"
+          />
+          <MetricCard
+            title="Mean Time To Detect"
+            value={metrics ? `${metrics.meanTimeToDetectMs} ms` : '—'}
+            description="Average attack-start to alert time"
+            icon={Clock3}
+            accent="purple"
           />
         </section>
 
@@ -441,76 +515,12 @@ function App() {
               </div>
             </div>
 
-            <div className="chart-container">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart
-                  data={activityData}
-                  margin={{ top: 10, right: 5, left: -20, bottom: 0 }}
-                >
-                  <defs>
-                    <linearGradient
-                      id="activityGradient"
-                      x1="0"
-                      y1="0"
-                      x2="0"
-                      y2="1"
-                    >
-                      <stop
-                        offset="0%"
-                        stopColor="#9b78ff"
-                        stopOpacity={0.32}
-                      />
-                      <stop
-                        offset="100%"
-                        stopColor="#9b78ff"
-                        stopOpacity={0}
-                      />
-                    </linearGradient>
-                  </defs>
-
-                  <CartesianGrid
-                    stroke="#272638"
-                    strokeDasharray="3 5"
-                    vertical={false}
-                  />
-
-                  <XAxis
-                    dataKey="time"
-                    tick={{ fill: '#77768d', fontSize: 11 }}
-                    axisLine={false}
-                    tickLine={false}
-                    dy={10}
-                  />
-
-                  <YAxis
-                    tick={{ fill: '#77768d', fontSize: 11 }}
-                    axisLine={false}
-                    tickLine={false}
-                    allowDecimals={false}
-                  />
-
-                  <Tooltip
-                    contentStyle={{
-                      background: '#191827',
-                      border: '1px solid #353149',
-                      borderRadius: '8px',
-                      color: '#f5f3ff',
-                      fontSize: '12px',
-                    }}
-                    labelStyle={{ color: '#b6a1ff' }}
-                  />
-
-                  <Area
-                    type="monotone"
-                    dataKey="events"
-                    name="Illustrative events"
-                    stroke="#a58aff"
-                    strokeWidth={2.5}
-                    fill="url(#activityGradient)"
-                    activeDot={{ r: 5, fill: '#bdaaff' }}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
+            <div className="chart-container" ref={chartContainerRef}>
+              {shouldLoadChart && (
+                <Suspense fallback={null}>
+                  <ActivityChart />
+                </Suspense>
+              )}
             </div>
 
             <div className="chart-note">
@@ -542,7 +552,7 @@ function App() {
                 {alerts.map((alert, index) => (
                   <div
                     className="detection-card"
-                    key={`${alert.ruleName}-${alert.sourceIp}-${index}`}
+                    key={alert.id ?? `${alert.ruleName}-${alert.sourceIp}-${index}`}
                   >
                     <div className="detection-card-top">
                       <div className="detection-icon">
@@ -557,12 +567,26 @@ function App() {
                     <div className="detection-details">
                       <div className="detail-row">
                         <span>Source IP</span>
-                        <code>{alert.sourceIp}</code>
+                        <code>{alert.sourceIps?.length > 1
+                          ? alert.sourceIps.join(', ')
+                          : alert.sourceIp}</code>
                       </div>
+
+                      {alert.username && (
+                        <div className="detail-row">
+                          <span>Target account</span>
+                          <code>{alert.username}</code>
+                        </div>
+                      )}
 
                       <div className="detail-row">
                         <span>Failed attempts</span>
                         <strong>{alert.failedAttempts}</strong>
+                      </div>
+
+                      <div className="detail-row">
+                        <span>Rule ID</span>
+                        <code>{alert.ruleId}</code>
                       </div>
 
                       <div className="detail-row">
@@ -571,9 +595,11 @@ function App() {
                       </div>
                     </div>
 
+                    {alert.message && <p className="detection-message">{alert.message}</p>}
+
                     <div className="detection-footer">
                       <CheckCircle2 size={14} />
-                      Detection rule matched
+                      Detected {formatTime(alert.detectedAt)}
                     </div>
                   </div>
                 ))}
@@ -590,7 +616,7 @@ function App() {
 
             <button
               className="secondary-button full-width"
-              onClick={runSimulation}
+              onClick={() => runSimulation()}
               disabled={simulating || health !== 'online'}
             >
               {simulating ? (
@@ -626,6 +652,7 @@ function App() {
                     <tr>
                       <th>EVENT</th>
                       <th>SOURCE IP</th>
+                      <th>TARGET ACCOUNT</th>
                       <th>RESULT</th>
                       <th>TIMESTAMP</th>
                     </tr>
@@ -658,6 +685,10 @@ function App() {
 
                           <td>
                             <code>{event.ip ?? 'Unknown'}</code>
+                          </td>
+
+                          <td>
+                            <code>{event.username ?? 'Unknown'}</code>
                           </td>
 
                           <td>
@@ -700,7 +731,7 @@ function App() {
                 Data retrieved from PurpleLoop API
               </span>
 
-              <button onClick={loadDashboard}>
+              <button onClick={refreshDashboard}>
                 <RefreshCw size={13} />
                 Refresh
               </button>
@@ -718,47 +749,36 @@ function App() {
               </div>
             </div>
 
-            {alerts.length > 0 ? (
-              <div className="mitre-content">
-                <div className="mitre-technique">
-                  <div className="mitre-icon">
-                    <Crosshair size={22} />
-                  </div>
-
-                  <div>
-                    <span className="mitre-label">TECHNIQUE ID</span>
-                    <h4>{alerts[0].mitreTechnique || 'Unmapped'}</h4>
-                  </div>
-                </div>
-
-                <div className="mitre-name">
-                  <span>Technique</span>
-                  <strong>
-                    {alerts[0].mitreTechnique === 'T1110'
-                      ? 'Brute Force'
-                      : 'Detection technique'}
-                  </strong>
-                </div>
-
-                <div className="mitre-name">
-                  <span>Detection rule</span>
-                  <strong>{alerts[0].ruleName}</strong>
-                </div>
-
-                <div className="mitre-name">
-                  <span>Severity</span>
-                  <SeverityBadge severity={alerts[0].severity} />
-                </div>
-
+            {rules.length > 0 ? (
+              <div className="rule-coverage-list">
+                {rules.map((rule) => (
+                  <article className="rule-coverage-item" key={rule.ruleId}>
+                    <div className="rule-coverage-heading">
+                      <code>{rule.mitreTechnique}</code>
+                      <span className={`rule-status ${rule.enabled ? 'enabled' : 'disabled'}`}>
+                        {rule.detectionStatus}
+                      </span>
+                    </div>
+                    <strong>{rule.ruleName}</strong>
+                    <p>{rule.description}</p>
+                    <div className="rule-coverage-footer">
+                      <span>{rule.ruleId}</span>
+                      <SeverityBadge severity={rule.severity} />
+                    </div>
+                  </article>
+                ))}
                 <div className="mitre-footer">
-                  <CheckCircle2 size={15} />
-                  Technique mapped by detection output
+                  <Crosshair size={15} />
+                  Implemented rule mappings only; this is not full ATT&amp;CK coverage.
                 </div>
               </div>
             ) : (
               <div className="empty-state compact">
                 <Crosshair size={25} />
-                <p>Run a simulation to display technique mapping.</p>
+                <p>
+                  {rulesError ||
+                    (loading ? 'Loading detection rules...' : 'No detection rules returned.')}
+                </p>
               </div>
             )}
           </article>
@@ -792,7 +812,7 @@ function App() {
               </div>
               <div>
                 <strong>Detection Engine</strong>
-                <span>Threshold-based rule</span>
+                <span>Stateful windowed rules</span>
               </div>
             </div>
 
@@ -816,7 +836,7 @@ function App() {
               </div>
               <div>
                 <strong>Measurement</strong>
-                <span>Coverage and MTTD planned</span>
+                <span>Coverage and MTTD metrics</span>
               </div>
             </div>
           </div>
