@@ -86,8 +86,9 @@ public class BruteForceDetector {
 
             AttemptState state = attemptsByIp.computeIfAbsent(event.getIp(), ignored -> new AttemptState());
             state.events.computeIfAbsent(timestamp, ignored -> new ArrayList<>()).add(event);
+            state.failedAttempts++;
 
-            if (!state.alerted && state.count() >= threshold) {
+            if (!state.alerted && state.failedAttempts >= threshold) {
                 List<String> sources = List.of(event.getIp());
                 results.add(new DetectionResult(
                         RULE_ID,
@@ -95,12 +96,12 @@ public class BruteForceDetector {
                         event.getIp(),
                         sources,
                         event.getUsername(),
-                        state.count(),
+                        state.failedAttempts,
                         SEVERITY,
                         MITRE_TECHNIQUE,
                         LocalDateTime.now(clock),
                         state.firstEvent().getTimestamp(),
-                        "Detected " + state.count() + " failed login attempts from " + event.getIp()
+                        "Detected " + state.failedAttempts + " failed login attempts from " + event.getIp()
                 ));
                 state.alerted = true;
             }
@@ -132,9 +133,9 @@ public class BruteForceDetector {
         attemptsByIp.entrySet().removeIf(entry -> {
             AttemptState state = entry.getValue();
             while (!state.events.isEmpty() && state.events.firstKey().isBefore(cutoff)) {
-                state.events.pollFirstEntry();
+                state.failedAttempts -= state.events.pollFirstEntry().getValue().size();
             }
-            if (state.count() < threshold) {
+            if (state.failedAttempts < threshold) {
                 state.alerted = false;
             }
             return state.events.isEmpty();
@@ -144,10 +145,7 @@ public class BruteForceDetector {
     private static class AttemptState {
         private final NavigableMap<LocalDateTime, List<LoginEvent>> events = new TreeMap<>();
         private boolean alerted;
-
-        private int count() {
-            return events.values().stream().mapToInt(List::size).sum();
-        }
+        private int failedAttempts;
 
         private LoginEvent firstEvent() {
             return events.firstEntry().getValue().get(0);

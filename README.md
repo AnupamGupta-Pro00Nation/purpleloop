@@ -1,240 +1,220 @@
 # PurpleLoop
 
-PurpleLoop is a purple-team simulation and detection-engineering dashboard built with Spring Boot and React. It models controlled single-source and distributed brute-force workflows, stores synthetic authentication telemetry in memory, evaluates time-windowed detection rules, and visualizes metrics, alert history, and MITRE ATT&CK mappings.
+PurpleLoop is a small purple-team and detection-engineering demonstration platform. A Spring Boot API generates controlled authentication events, evaluates two brute-force detection rules, and exposes retained events, alerts, and metrics to a React dashboard.
+
+All current telemetry is synthetic. PurpleLoop does not collect endpoint or identity-provider logs, authenticate users, block attackers, or provide a production SIEM.
+
+## Problem and objectives
+
+Security teams need a repeatable way to exercise detection logic and see what evidence a rule produces. PurpleLoop demonstrates that workflow with a narrow, inspectable set of simulated authentication events.
+
+The project aims to:
+
+- Generate repeatable single-source and distributed brute-force scenarios.
+- Evaluate event timestamps against configurable rolling windows.
+- Return explainable alerts with source, target, severity, and ATT&CK metadata.
+- Display API-backed event activity, alert history, and retained-history metrics.
+- Keep the implementation small enough to run locally without a database or external services.
+
+## Features
+
+- Synthetic failed and successful login events, including a small seed dataset when the backend starts.
+- Single-source brute-force detection grouped by source IP.
+- Distributed brute-force detection grouped by target account and distinct source IP.
+- Timestamp-window expiry, duplicate event-ID suppression inside the active window, and one alert per active detection episode.
+- Configurable thresholds, detection window, simulation request limit, and bounded event/alert history.
+- REST endpoints for health, events, alerts, metrics, detection rules, and manually triggered simulations.
+- A React dashboard that reads API data, shows loading/error/empty states, and starts simulations only after a user action.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    User[Security Analyst] --> Frontend[React + Vite Frontend]
-    Frontend --> API[Spring Boot REST API]
+    Analyst[Analyst] --> UI[React + Vite dashboard]
+    UI -->|GET data / POST simulation| API[Spring Boot REST API]
     API --> Service[PurpleLoopService]
-    Service --> Events[In-memory Event History]
-    Service --> Alerts[In-memory Alert History]
-    Service --> Rules[Detection Rule Catalog]
-    Service --> Single[BruteForceDetector]
-    Service --> Distributed[DistributedBruteForceDetector]
-    Config[DetectionProperties] --> Single
-    Config --> Distributed
-    Single --> Results[DetectionResult]
-    Distributed --> Results
-    Results --> Dashboard[Metrics, Alerts, Rules, MITRE]
+    Service -->|startup seed or simulation| Events[In-memory event history]
+    Events --> Processing[Event processing]
+    Processing --> BF[BruteForceDetector]
+    Processing --> DBF[DistributedBruteForceDetector]
+    BF --> Alerts[In-memory alert history]
+    DBF --> Alerts
+    Events --> Metrics[Metrics from retained history]
+    Alerts --> Metrics
+    Service --> Rules[Detection rule metadata]
+    Alerts --> API
+    Metrics --> API
+    Rules --> API
+    API --> UI
 ```
 
-## Project Overview
+The runtime flow is **Simulation → Events → Processing → Detection → Alerts → Metrics → Dashboard**. The simulation endpoints create events in the backend; the frontend then reloads events, alerts, and metrics from the API. The browser does not run detection logic.
 
-This project demonstrates:
-- Java + Spring Boot REST API design
-- Authentication telemetry generation and retention
-- Stateful, time-windowed detection across processing batches
-- Single-source and distributed brute-force detection
-- Detection rule metadata and MITRE ATT&CK mapping for T1110 (Brute Force)
-- Event, alert-category, login-outcome, and MTTD metrics
-- React-driven dashboard integration
-- Unit testing and production build validation
+## Detection engine
 
-## Features
+| Rule ID | Rule | Current behavior | Default threshold | Severity | MITRE ATT&CK |
+|---|---|---|---|---|---|
+| `PL-BF-001` | Repeated Failed Logins | Counts failed logins from the same source IP within the detection window. Attempts are grouped by IP, not by account. | 3 failures in 5 minutes | HIGH | [T1110 — Brute Force](https://attack.mitre.org/techniques/T1110/) |
+| `PL-DBF-001` | Distributed Brute Force | Counts failed logins against the same valid target account and requires both enough failures and enough distinct source IPs. | 6 failures from at least 3 IPs in 5 minutes | HIGH | [T1110 — Brute Force](https://attack.mitre.org/techniques/T1110/) |
 
-- Synthetic failed-login event generation with realistic timestamps
-- In-memory event history retained while the backend process remains running
-- Single-source detection at 3 failed attempts per IP within a 5-minute window by default
-- Distributed detection at 6 failures from at least 3 IPs against the same account within that window
-- Episode-based alert deduplication, with a new alert after the prior episode expires
-- Stable event IDs and per-detector replay suppression within the active detection window
-- Configurable rolling simulation rate limit and bounded event/alert history with oldest-first eviction
-- Synthetic distributed attack simulation from multiple IPs against a shared target account
-- Rule identifiers, descriptions, severity, status, and ATT&CK mapping available through the API
-- Dashboard for overview metrics, events, detections, and MITRE technique mapping
-- Simulation triggered only by the user clicking the dashboard button
-- Local development and Render/Vercel deployment preparation
+Both rules ignore successful logins, emit one alert while a qualifying episode remains active, and can emit again after the rolling state drops below its threshold and a new episode qualifies. The window includes an event exactly at its cutoff. Events more than five minutes in the future (or farther than the configured detection window when that window is shorter) are ignored. Delayed events inside the active window can still count.
 
-## Detection Logic
+The distributed rule requires a nonblank target account other than `unknown`; it will not combine attempts against different accounts. The project does not inspect passwords or password hashes, so it does not claim to detect or map [T1110.003 — Password Spraying](https://attack.mitre.org/techniques/T1110/003/).
 
-`BruteForceDetector` retains timestamped failed login attempts by source IP, prunes attempts outside the configured window, and emits one alert when a source reaches its threshold. Further failures do not produce duplicate alerts for that episode; after the episode expires, a new threshold crossing can alert again. Valid event timestamps are ordered so delayed events still count when they remain inside the window. Successful logins never increment failure totals.
+Severity is currently a fixed rule attribute, not a calculated risk score. Event IDs are generated for simulated events; detector-level duplicate suppression applies only while IDs remain in the active detection window.
 
-`DistributedBruteForceDetector` applies a separate threshold per target account and requires both a minimum failure count and a minimum number of distinct source IPs. Its current behavior maps to **T1110 — Brute Force**. It does not claim **T1110.003 — Password Spraying**: events do not include password evidence, and distributed attempts against one account alone do not establish password spraying.
+## Simulation methodology
 
-Alerts preserve the original `ruleName`, `sourceIp`, `failedAttempts`, `severity`, and `mitreTechnique` fields and add a unique ID, rule ID, source IP list, target account, detection/episode timestamps, and a descriptive message. MTTD is the average alert timestamp minus episode-start timestamp for alerts with valid nonnegative timestamps; it is zero when no measurable alerts exist.
+On backend startup, the service adds six synthetic events: five failed logins from one IP and one successful login. With the default rule settings, this produces an initial single-source alert. This seed data is provided for dashboard demonstration and is not observed activity.
 
-Simulation endpoints share an in-memory rolling rate limit (default 20 requests per minute). Event and alert histories are also bounded in memory (defaults: 10,000 events and 5,000 alerts); oldest records are evicted first and metrics describe retained history. Event IDs are deduplicated by each detector only while they remain within its active time window. Rate-limit counters, history, and idempotency state are process-local: restarts reset them, and separate replicas do not coordinate them. These controls are not substitutes for shared rate limiting, authentication, durable storage, or pagination in a multi-instance deployment.
+The two `POST` simulation endpoints generate new failed-login events:
 
-## API Endpoints
+- The single-source scenario uses one synthetic source IP and the configured single-source threshold.
+- The distributed scenario targets one synthetic account and generates enough distinct synthetic source IPs to meet the configured failure and IP thresholds.
 
-- `GET /api/health` — backend health status
-- `GET /api/events` — current in-memory event history
-- `GET /api/alerts` — current in-memory alert history
-- `GET /api/metrics` — event/alert totals, unique IPs, failed and successful login counts, alert categories, and mean time to detect in milliseconds
-- `GET /api/rules` — detection rule metadata and enabled/disabled status
-- `POST /api/simulate/brute-force` — generates new failed-login telemetry, records it, runs detection, and returns newly generated alerts
-- `POST /api/simulate/distributed-brute-force` — generates failures from multiple IPs against one synthetic account and returns newly generated alerts
-- Simulation requests exceeding the configured rolling limit return HTTP `429 Too Many Requests`.
+The dashboard does not trigger a simulation on initial page load or refresh. Simulations are triggered by the dashboard buttons or by an explicit API `POST`.
 
-The original `/api/health`, `/api/events`, `/api/alerts`, `/api/metrics`, and `/api/simulate/brute-force` routes remain available.
+## Metrics
 
-## Technologies Used
+The metrics endpoint describes the **currently retained in-memory history**, not a durable or complete event archive.
 
-- Java 25 (LTS)
-- Spring Boot 3.5.6
+| Metric | Calculation |
+|---|---|
+| `totalEvents` | Number of retained events. |
+| `totalAlerts` | Number of retained alerts. |
+| `uniqueSourceIps` | Distinct, nonblank source IPs in retained events. |
+| `totalFailedLogins` / `totalSuccessfulLogins` | Counts of retained events by `success` value. |
+| `bruteForceAlerts` / `distributedAttackAlerts` | Retained alerts grouped by rule ID. |
+| `meanTimeToDetectMs` | Rounded average of `detectedAt - attackStartedAt` across retained alerts with both timestamps and a nonnegative duration; `0` when none qualify. |
+
+The activity chart groups valid retained event timestamps into 24 hour-of-day buckets, interpreted in the browser's local time zone. It is not a request-rate or time-series chart.
+
+## Screenshots
+
+Screenshots are not included yet. Add genuine captures after running the application; do not treat these entries as screenshots.
+
+- Dashboard overview — _screenshot not captured_
+- Single-source simulation result — _screenshot not captured_
+- Distributed simulation result — _screenshot not captured_
+
+## Technology stack
+
+- Java 25 and Spring Boot 3.5.6
 - Maven
-- React 19
-- Vite 8
-- Recharts
-- Lucide React
+- React 19 and Vite 8
+- Recharts and Lucide React
+- JUnit 5 and Spring Boot Test for backend tests
+- Vitest, jsdom, and Testing Library for frontend tests
 
 ## Prerequisites
 
-- Java 25 (LTS)
-- Maven 3.9+
-- Node.js 20.19+ or 22.12+ and npm
+- JDK 25
+- Maven 3.9 or newer
+- Node.js 22.22.2+, 24.15+, or 26+ and npm (required by the frontend test environment)
 
-## Local Setup
+## Run locally
 
-1. Clone the repository.
-2. In the project root, start the backend:
+Start the backend from the repository root:
 
 ```bash
 mvn spring-boot:run
 ```
 
-3. In the `frontend` directory, install dependencies:
+In a second terminal, install the locked frontend dependencies and start Vite:
 
 ```bash
 cd frontend
-npm install
+npm ci
+npm run dev
 ```
 
-4. Create a local frontend environment file from the sample:
+Open `http://localhost:5173`. When `VITE_API_BASE_URL` is unset, the Vite development server proxies `/api` requests to `http://localhost:8080`. The backend defaults to port `8080`, or uses the `PORT` environment variable when provided.
 
-```bash
-cp .env.example .env
-```
+To run simulations locally, configure `PURPLELOOP_SIMULATION_ACCESS_TOKEN` in the backend process with a randomly generated value of at least 32 UTF-8 bytes, then enter that same value in the dashboard's simulation access field. Keep it out of source control and frontend `VITE_` variables. Without it, dashboard reads remain available and simulation requests fail closed.
 
-5. Start the frontend:
-
-```bash
-npm run dev -- --host 0.0.0.0
-```
-
-6. The local app should run with the backend on port 8080 and the frontend on port 5173 by default.
-
-## Configuration
-
-Environment variables:
-
-- Detection configuration (can also be set in `application.properties`):
-  - `PURPLELOOP_DETECTION_BRUTE_FORCE_FAILURE_THRESHOLD` (default `3`, must be at least `1`)
-  - `PURPLELOOP_DETECTION_WINDOW` (default `PT5M`, a positive ISO-8601 duration)
-  - `PURPLELOOP_DETECTION_DISTRIBUTED_FAILURE_THRESHOLD` (default `6`, must be at least `1`)
-  - `PURPLELOOP_DETECTION_MINIMUM_DISTINCT_SOURCE_IPS` (default `3`, must be at least `2`)
-  - `PURPLELOOP_DETECTION_BRUTE_FORCE_ENABLED` (default `true`)
-  - `PURPLELOOP_DETECTION_DISTRIBUTED_ENABLED` (default `true`)
-  - `PURPLELOOP_DETECTION_SIMULATION_RATE_LIMIT` (default `20`, between `1` and `10000` requests)
-  - `PURPLELOOP_DETECTION_SIMULATION_RATE_WINDOW` (default `PT1M`, a positive ISO-8601 duration)
-  - `PURPLELOOP_DETECTION_MAX_EVENT_HISTORY_SIZE` (default `10000`, between `1` and `1000000`)
-  - `PURPLELOOP_DETECTION_MAX_ALERT_HISTORY_SIZE` (default `5000`, between `1` and `1000000`)
-- Frontend (Vite): `VITE_API_BASE_URL`
-  - Required on Vercel; set it to the backend base URL, such as `https://your-service.onrender.com`.
-  - Optional locally; if unset, Vite's `/api` proxy forwards requests to `http://localhost:8080`.
-- Backend: `CORS_ALLOWED_ORIGINS`
-  - Set to the exact Vercel origin in Render. For local development, the default allows `http://localhost:5173` and `http://127.0.0.1:5173`.
-
-Do not use a wildcard production CORS origin.
-
-## Testing and Build
-
-Run backend tests:
+To run tests and build artifacts:
 
 ```bash
 mvn clean test
 mvn clean package
-```
-
-Run the frontend production build:
-
-```bash
-npm --prefix frontend run build
+npm --prefix frontend run test
 npm --prefix frontend run lint
+npm --prefix frontend run build
 ```
 
-## Deployment
+## Configuration
 
-### Backend on Render
+Backend detection settings are bound from `purpleloop.detection` properties. The environment variable names and defaults are:
 
-A Render Blueprint is provided in `render.yaml`. It deploys the Spring Boot backend as a Docker web service because Render's native runtimes do not include Java. The root `Dockerfile` builds the application with Maven and Java 25, then runs the generated Spring Boot JAR with a Java 25 runtime.
+| Environment variable | Default | Accepted values |
+|---|---:|---|
+| `PURPLELOOP_DETECTION_BRUTE_FORCE_FAILURE_THRESHOLD` | `3` | 1–100,000 |
+| `PURPLELOOP_DETECTION_WINDOW` | `PT5M` | Positive ISO-8601 duration |
+| `PURPLELOOP_DETECTION_DISTRIBUTED_FAILURE_THRESHOLD` | `6` | 1–100,000 |
+| `PURPLELOOP_DETECTION_MINIMUM_DISTINCT_SOURCE_IPS` | `3` | 2–65,536 |
+| `PURPLELOOP_DETECTION_BRUTE_FORCE_ENABLED` | `true` | `true` or `false` |
+| `PURPLELOOP_DETECTION_DISTRIBUTED_ENABLED` | `true` | `true` or `false` |
+| `PURPLELOOP_DETECTION_SIMULATION_RATE_LIMIT` | `20` | 1–10,000 requests |
+| `PURPLELOOP_DETECTION_SIMULATION_RATE_WINDOW` | `PT1M` | Positive ISO-8601 duration |
+| `PURPLELOOP_DETECTION_MAX_EVENT_HISTORY_SIZE` | `10000` | 1–1,000,000 events |
+| `PURPLELOOP_DETECTION_MAX_ALERT_HISTORY_SIZE` | `5000` | 1–1,000,000 alerts |
+| `PURPLELOOP_SIMULATION_ACCESS_TOKEN` | Unset (simulation access disabled) | At least 32 UTF-8 bytes |
 
-Deployment settings:
-- Root Directory: repository root (`.`)
-- Runtime: Docker
-- Dockerfile Path: `./Dockerfile`
-- Docker Build Context: `.`
-- Health Check Path: `/api/health`
-- Do not set a custom build or start command; the Dockerfile builds and starts the app.
+`CORS_ALLOWED_ORIGINS` is a comma-separated list of exact browser origins. If unset, the backend allows `http://localhost:5173` and `http://127.0.0.1:5173`. Configure the production frontend origin explicitly; do not use a wildcard.
 
-The Maven package command used by the Dockerfile is `mvn -B package` from the repository root. It produces `target/purpleloop-0.1.0-SNAPSHOT.jar`. The app binds to Render's assigned `PORT`; `src/main/resources/application.properties` defaults to port `8080` for local development. Render supplies its own `PORT`, so do not hardcode a deployed port.
+`VITE_API_BASE_URL` sets the backend base URL in the frontend at build time. It is optional for local development and should be the deployed backend's HTTPS origin for a Vercel build. The example file is `frontend/.env.example`.
 
-After the Vercel deployment is created and its production domain is known, set this Render environment variable:
+Simulation `POST` requests require a bearer token that the backend checks against `PURPLELOOP_SIMULATION_ACCESS_TOKEN`. Configure a randomly generated value of at least 32 UTF-8 bytes in the backend runtime environment. If the setting is absent or too short, simulation requests fail closed with `503`; a missing or incorrect request token returns `401`. The dashboard accepts the operator token in a password field and keeps it only in page memory; it is not stored in local storage or embedded in the frontend build. Do not create a `VITE_` variable for this token. Read-only API requests remain public. CORS is a browser policy, not authorization.
 
-```text
-CORS_ALLOWED_ORIGINS=https://your-project.vercel.app
-```
+## API reference
 
-Use only the exact origin (scheme + hostname, no path or trailing slash). If additional known Vercel domains must call the API, provide a comma-separated list of exact origins. Do not include localhost in the production value unless local browser clients specifically need access. When unset locally, the backend permits `http://localhost:5173` and `http://127.0.0.1:5173`.
+All endpoints are under `/api`. The current API has no query parameters and no event-ingestion endpoint. The simulation `POST` endpoints accept no request body. Responses are JSON; timestamps are serialized from Java `LocalDateTime` values without an explicit time-zone offset.
 
-Render's free service may sleep while idle or restart, and in-memory events/alerts are lost on restart. The exact free-tier behavior can vary; check Render's current plan details before deploying.
+| Method and path | Request | Success response |
+|---|---|---|
+| `GET /api/health` | None | Object with `project`, `status`, and `message`. This is a process-level health response. |
+| `GET /api/events` | None | Array of retained event objects: `id`, `ip`, `success`, `username`, `timestamp`. |
+| `GET /api/alerts` | None | Array of retained alert objects: `id`, `ruleId`, `ruleName`, `sourceIp`, `sourceIps`, `username`, `failedAttempts`, `severity`, `mitreTechnique`, `detectedAt`, `attackStartedAt`, `message`. |
+| `GET /api/metrics` | None | Object containing the metric fields described above. |
+| `GET /api/rules` | None | Array of rule objects with `ruleId`, `ruleName`, `description`, `severity`, `mitreTechnique`, `detectionStatus`, and `enabled`. |
+| `POST /api/simulate/brute-force` | `Authorization: Bearer <operator token>`; no body or query parameters | Array of newly generated detection alerts; generated events are also added to retained history. |
+| `POST /api/simulate/distributed-brute-force` | `Authorization: Bearer <operator token>`; no body or query parameters | Array of newly generated detection alerts; generated events are also added to retained history. |
 
-### Frontend on Vercel
+Successful requests return `200 OK`. Simulation requests without a valid bearer token return `401 Unauthorized`; if the backend token is not configured or is too short, they return `503 Service Unavailable`. Simulation requests over the configured in-process rolling limit return `429 Too Many Requests`. These expected errors and unsupported methods return a Spring `ProblemDetail` body. Other framework or server errors are not promised to use this same error schema.
 
-Create a Vercel project connected to this repository with:
-- Root Directory: `frontend`
-- Framework Preset: Vite (or Other)
-- Build Command: `npm run build`
-- Output Directory: `dist`
-- Environment variable for Production: `VITE_API_BASE_URL=https://your-service.onrender.com`
+Read-only routes are public. Simulation routes use a single shared operator token, not per-user authentication or authorization. Anyone who obtains that token can run simulations; distribute it only through a secure channel and rotate it if exposed. The API remains intended for controlled demonstration use, not as a trusted production data service.
 
-The frontend reads `VITE_API_BASE_URL` at build time, strips trailing slashes, and uses it for all API requests. For local development, `frontend/.env.example` shows the local backend URL; the Vite dev-server proxy also forwards `/api` requests to `http://localhost:8080` when the variable is unset. `frontend/vercel.json` rewrites direct paths to `index.html` so the Vite single-page app can be refreshed or opened at a direct URL.
+## Deployment architecture
 
-### Deployment order
+The repository includes deployment configuration for a split deployment:
 
-1. Deploy the backend to Render using the repository Blueprint/Dockerfile. Confirm the Render `/api/health` URL returns a successful response.
-2. Deploy the frontend to Vercel with Root Directory `frontend` and `VITE_API_BASE_URL` set to the Render service's HTTPS base URL.
-3. Copy the Vercel production origin (for example, `https://your-project.vercel.app`) into Render's `CORS_ALLOWED_ORIGINS` environment variable and redeploy the backend.
-4. Open the Vercel site, refresh it, confirm API data loads, and trigger a simulation manually. If Vercel preview deployments should also call the backend, add their exact origins as a comma-separated list in Render.
+- **Backend:** `render.yaml` declares a Docker web service with `/api/health` as its health-check path. The root `Dockerfile` packages the Spring Boot application and runs its JAR as a non-root user.
+- **Frontend:** deploy the `frontend` directory to Vercel as a Vite app. `frontend/vercel.json` supplies SPA rewrites and browser security headers.
+- **Connection:** set Vercel's `VITE_API_BASE_URL` to the backend HTTPS origin. Set Render's `CORS_ALLOWED_ORIGINS` to the exact Vercel origin and configure `PURPLELOOP_SIMULATION_ACCESS_TOKEN` as a backend secret. The token is entered by an authorized operator in the dashboard; it is not a Vercel build variable.
 
-Deployment instructions describe configuration only; no live deployment is claimed.
+For Vercel, use the `frontend` directory as the project root, `npm run build` as the build command, and `dist` as the output directory. Set `VITE_API_BASE_URL` in the Vercel environment before building. Configure `CORS_ALLOWED_ORIGINS` in the backend environment after the frontend domain is known. Actual cloud deployment and provider-side environment settings are not included in this repository.
 
-## Known Limitations
+## Known limitations
 
-- Event and alert history are retained in backend memory only while the Spring Boot process remains running.
-- A backend restart resets the in-memory state.
-- Detection attempt state, events, and alerts are in-memory and local to one application process; the detectors are not distributed across backend replicas.
-- Simulation rate limiting is process-local and can be bypassed across multiple backend replicas; it is not a replacement for an edge/API gateway limit.
-- Event replay suppression is also in-memory and covers IDs retained in the active detection window; it is not durable, cross-replica idempotency.
-- History limits bound memory use by evicting oldest events and alerts, so metrics and API history cover retained records only.
-- Synthetic authentication events contain no passwords or password hashes, so password spraying cannot be inferred or mapped to T1110.003.
-- Distributed simulation generates enough distinct synthetic IPv4 addresses for the configured IP threshold, up to 65,536; it is controlled demonstration data, not production attack telemetry.
-- This is a controlled simulation platform and not a production SIEM or detection system.
-- Free hosting platforms may sleep or restart the service without notice.
+- Events, alerts, detector state, duplicate-ID tracking, and simulation rate-limit counters are in memory. Restarting the process loses them; separate replicas do not share them.
+- Event and alert histories are bounded by configuration and evict the oldest entries. Metrics and API history therefore cover retained records only.
+- The simulation rate limit is global to one process, not per user or shared across replicas. It is not a substitute for edge/API-gateway rate limiting.
+- The simulation bearer token is a shared operator credential, not user-level authentication; read-only routes remain public. The token must be configured separately in each backend replica.
+- There is no external event ingestion, persistent storage, alert lifecycle, or response automation.
+- The brute-force detector groups by source IP regardless of account. The distributed detector groups by account but only supports the described failed-login behavior.
+- Simulated events are controlled test data, not evidence of real attacks or validation against a real identity provider.
+- This project demonstrates a limited detection workflow; it is not a production SIEM or a complete purple-team platform.
 
-## Future Improvements
+## Possible next steps
 
-- Persistent storage with PostgreSQL or SQLite
-- More detection rules and validated ATT&CK mappings
-- Realistic alert lifecycle states such as open, acknowledged, resolved
-- Authentication and authorization for the portal
-- CI/CD pipeline and release automation
+- Add authenticated, validated event ingestion and access control if the project expands beyond a local demonstration.
+- Add durable storage and cross-instance coordination for history, deduplication, and rate limits.
+- Add detection rules only with explicit event requirements and validated ATT&CK mappings.
+- Add alert lifecycle and operational integrations.
+- Add CI workflows for backend tests, frontend tests, and release builds.
 
-## Security Notes
+## Project information
 
-- No secrets, tokens, or credentials are required to run the project locally.
-- Environment-specific values should be stored in deployment environment variables, not hardcoded into source files.
-- CORS is limited to explicit allowed origins rather than allowing every origin.
-
-## Git Status
-
-Before deployment or final review, run:
-
-```bash
-git status --short
-```
-
-Do not commit or push without explicit authorization.
+- Repository: [AnupamGupta-Pro00Nation/purpleloop](https://github.com/AnupamGupta-Pro00Nation/purpleloop)
+- Project name and Maven artifact: `PurpleLoop` / `com.purpleloop:purpleloop`
+- The repository does not specify a separate author contact in this README.

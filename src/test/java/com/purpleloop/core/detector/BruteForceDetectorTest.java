@@ -45,12 +45,42 @@ class BruteForceDetectorTest {
         List<DetectionResult> results = detector.analyze(events("192.168.1.10", 3, 0));
 
         assertEquals(1, results.size());
+        assertEquals("PL-BF-001", results.get(0).getRuleId());
+        assertEquals("Repeated Failed Logins", results.get(0).getRuleName());
         assertEquals("192.168.1.10", results.get(0).getSourceIp());
+        assertEquals(List.of("192.168.1.10"), results.get(0).getSourceIps());
+        assertEquals("user@example.test", results.get(0).getUsername());
         assertEquals(3, results.get(0).getFailedAttempts());
+        assertEquals("HIGH", results.get(0).getSeverity());
         assertEquals("T1110", results.get(0).getMitreTechnique());
+        assertTrue(results.get(0).getMessage().contains("3 failed login attempts"));
         assertFalse(results.get(0).getId().isBlank());
         assertEquals(START, results.get(0).getAttackStartedAt());
         assertEquals(START.plusSeconds(10), results.get(0).getDetectedAt());
+    }
+
+    @Test
+    void eventAtWindowBoundaryCountsButEventJustOutsideDoesNot() {
+        Clock boundaryClock = Clock.fixed(START.plusSeconds(300).toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
+        BruteForceDetector boundaryDetector = new BruteForceDetector(
+                2, Duration.ofMinutes(5), boundaryClock);
+
+        List<DetectionResult> boundaryResults = boundaryDetector.analyze(List.of(
+                event("192.168.1.10", false, 0),
+                event("192.168.1.10", false, 300)
+        ));
+
+        assertEquals(1, boundaryResults.size());
+        assertEquals(2, boundaryResults.get(0).getFailedAttempts());
+        assertEquals(START, boundaryResults.get(0).getAttackStartedAt());
+
+        Clock outsideClock = Clock.fixed(START.plusSeconds(301).toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
+        BruteForceDetector outsideDetector = new BruteForceDetector(
+                2, Duration.ofMinutes(5), outsideClock);
+        assertTrue(outsideDetector.analyze(List.of(
+                event("192.168.1.10", false, 0),
+                event("192.168.1.10", false, 301)
+        )).isEmpty());
     }
 
     @Test

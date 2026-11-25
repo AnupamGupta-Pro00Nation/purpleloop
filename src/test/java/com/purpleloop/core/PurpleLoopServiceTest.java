@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.web.server.ResponseStatusException;
 
 import com.purpleloop.core.config.DetectionProperties;
+import com.purpleloop.core.detector.BruteForceDetector;
 
 class PurpleLoopServiceTest {
 
@@ -40,6 +41,24 @@ class PurpleLoopServiceTest {
         assertEquals(1, service.getAlerts().size());
         assertNotEquals(oldAlertId, service.getAlerts().get(0).getId());
         assertThrows(ResponseStatusException.class, service::simulateDistributedBruteForce);
+    }
+
+    @Test
+    void bruteForceSimulationUpdatesEventAlertAndMetricCountsExactlyOnce() {
+        PurpleLoopService service = new PurpleLoopService(new DetectionProperties(), CLOCK);
+        DetectionMetrics before = service.getMetrics();
+
+        var results = service.simulateBruteForce();
+        DetectionMetrics after = service.getMetrics();
+
+        assertEquals(1, results.size());
+        assertEquals(BruteForceDetector.RULE_ID, results.get(0).getRuleId());
+        assertEquals(before.getTotalEvents() + 3, after.getTotalEvents());
+        assertEquals(before.getTotalFailedLogins() + 3, after.getTotalFailedLogins());
+        assertEquals(before.getTotalSuccessfulLogins(), after.getTotalSuccessfulLogins());
+        assertEquals(before.getTotalAlerts() + 1, after.getTotalAlerts());
+        assertEquals(before.getBruteForceAlerts() + 1, after.getBruteForceAlerts());
+        assertEquals(before.getDistributedAttackAlerts(), after.getDistributedAttackAlerts());
     }
 
     @Test

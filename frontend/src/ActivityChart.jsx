@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import {
   Area,
   AreaChart,
@@ -7,23 +8,25 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { getHourlyActivity } from './activityData.js'
 
-const activityData = [
-  { time: '00:00', events: 2 },
-  { time: '04:00', events: 4 },
-  { time: '08:00', events: 3 },
-  { time: '12:00', events: 7 },
-  { time: '16:00', events: 5 },
-  { time: '20:00', events: 9 },
-  { time: '23:59', events: 6 },
-]
+export default function ActivityChart({ events = [] }) {
+  const activityData = useMemo(() => getHourlyActivity(events), [events])
 
-export default function ActivityChart() {
+  if (!activityData) {
+    return (
+      <div className="chart-empty-state">
+        No valid event timestamps available for the chart.
+      </div>
+    )
+  }
+
   return (
     <ResponsiveContainer width="100%" height="100%">
       <AreaChart
         data={activityData}
         margin={{ top: 10, right: 5, left: -20, bottom: 0 }}
+        accessibilityLayer
       >
         <defs>
           <linearGradient
@@ -69,7 +72,7 @@ export default function ActivityChart() {
         <Area
           type="monotone"
           dataKey="events"
-          name="Illustrative events"
+          name="Login events"
           stroke="#a58aff"
           strokeWidth={2.5}
           fill="url(#activityGradient)"

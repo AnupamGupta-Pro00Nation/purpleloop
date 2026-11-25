@@ -35,7 +35,10 @@ class DistributedBruteForceDetectorTest {
         assertEquals("admin", results.get(0).getUsername());
         assertEquals(3, results.get(0).getSourceIps().size());
         assertEquals(5, results.get(0).getFailedAttempts());
+        assertEquals("PL-DBF-001", results.get(0).getRuleId());
+        assertEquals("HIGH", results.get(0).getSeverity());
         assertEquals("T1110", results.get(0).getMitreTechnique());
+        assertTrue(results.get(0).getMessage().contains("5 failed login attempts"));
     }
 
     @Test
@@ -70,7 +73,44 @@ class DistributedBruteForceDetectorTest {
                 event("192.168.1.10", "admin", 5)
         );
 
-        assertEquals(1, detector.analyze(events).size());
+        List<DetectionResult> results = detector.analyze(events);
+
+        assertEquals(1, results.size());
+        assertEquals("admin", results.get(0).getUsername());
+    }
+
+    @Test
+    void distinctAccountsCannotCombineToMeetDistributedThreshold() {
+        DistributedBruteForceDetector detector = new DistributedBruteForceDetector(
+                3, 2, Duration.ofMinutes(5));
+
+        assertTrue(detector.analyze(List.of(
+                event("192.168.1.10", "admin", 0),
+                event("192.168.1.10", "admin", 1),
+                event("192.168.1.20", "operator", 2),
+                event("192.168.1.20", "operator", 3)
+        )).isEmpty());
+
+        List<DetectionResult> results = detector.analyze(List.of(
+                event("192.168.1.20", "admin", 4)
+        ));
+
+        assertEquals(1, results.size());
+        assertEquals("admin", results.get(0).getUsername());
+        assertEquals(3, results.get(0).getFailedAttempts());
+        assertEquals(List.of("192.168.1.10", "192.168.1.20"), results.get(0).getSourceIps());
+    }
+
+    @Test
+    void failureThresholdWithoutEnoughDistinctSourceIpsDoesNotAlert() {
+        DistributedBruteForceDetector detector = new DistributedBruteForceDetector(
+                3, 2, Duration.ofMinutes(5));
+
+        assertTrue(detector.analyze(List.of(
+                event("192.168.1.10", "admin", 0),
+                event("192.168.1.10", "admin", 1),
+                event("192.168.1.10", "admin", 2)
+        )).isEmpty());
     }
 
     @Test
@@ -84,6 +124,26 @@ class DistributedBruteForceDetectorTest {
         ));
 
         assertTrue(detector.analyze(events).isEmpty());
+    }
+
+    @Test
+    void expiredAttemptsAreRemovedFromFailureAndDistinctIpCounts() {
+        DistributedBruteForceDetector detector = new DistributedBruteForceDetector(
+                3, 2, Duration.ofMinutes(5));
+
+        assertTrue(detector.analyze(List.of(
+                event("192.168.1.10", "admin", 0),
+                event("192.168.1.10", "admin", 1),
+                event("192.168.1.10", "admin", 2)
+        )).isEmpty());
+
+        List<DetectionResult> results = detector.analyze(List.of(
+                event("192.168.1.20", "admin", 301)
+        ));
+
+        assertEquals(1, results.size());
+        assertEquals(3, results.get(0).getFailedAttempts());
+        assertEquals(List.of("192.168.1.10", "192.168.1.20"), results.get(0).getSourceIps());
     }
 
     @Test

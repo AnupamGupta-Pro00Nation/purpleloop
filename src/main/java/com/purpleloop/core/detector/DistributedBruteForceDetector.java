@@ -91,22 +91,24 @@ public class DistributedBruteForceDetector {
             AttemptState state = attemptsByUsername.computeIfAbsent(
                     event.getUsername(), ignored -> new AttemptState());
             state.events.computeIfAbsent(timestamp, ignored -> new ArrayList<>()).add(event);
+            state.failedAttempts++;
+            state.sourceIpCounts.merge(event.getIp(), 1, Integer::sum);
 
-            Set<String> sourceIps = sourceIps(state);
-            if (!state.alerted && state.count() >= failureThreshold
-                    && sourceIps.size() >= minimumDistinctSourceIps) {
+            if (!state.alerted && state.failedAttempts >= failureThreshold
+                    && state.sourceIpCounts.size() >= minimumDistinctSourceIps) {
+                Set<String> sourceIps = sourceIps(state);
                 results.add(new DetectionResult(
                         RULE_ID,
                         RULE_NAME,
                         "Multiple source IPs",
                         List.copyOf(sourceIps),
                         event.getUsername(),
-                        state.count(),
+                        state.failedAttempts,
                         SEVERITY,
                         MITRE_TECHNIQUE,
                         LocalDateTime.now(clock),
                         state.firstEvent().getTimestamp(),
-                        "Detected " + state.count() + " failed login attempts against "
+                        "Detected " + state.failedAttempts + " failed login attempts against "
                                 + event.getUsername() + " from " + sourceIps.size() + " source IPs"
                 ));
                 state.alerted = true;
@@ -139,10 +141,19 @@ public class DistributedBruteForceDetector {
         attemptsByUsername.entrySet().removeIf(entry -> {
             AttemptState state = entry.getValue();
             while (!state.events.isEmpty() && state.events.firstKey().isBefore(cutoff)) {
-                state.events.pollFirstEntry();
+                List<LoginEvent> expiredEvents = state.events.pollFirstEntry().getValue();
+                state.failedAttempts -= expiredEvents.size();
+                for (LoginEvent event : expiredEvents) {
+                    int remainingAttempts = state.sourceIpCounts.get(event.getIp()) - 1;
+                    if (remainingAttempts == 0) {
+                        state.sourceIpCounts.remove(event.getIp());
+                    } else {
+                        state.sourceIpCounts.put(event.getIp(), remainingAttempts);
+                    }
+                }
             }
-            Set<String> sourceIps = sourceIps(state);
-            if (state.count() < failureThreshold || sourceIps.size() < minimumDistinctSourceIps) {
+            if (state.failedAttempts < failureThreshold
+                    || state.sourceIpCounts.size() < minimumDistinctSourceIps) {
                 state.alerted = false;
             }
             return state.events.isEmpty();
@@ -158,11 +169,9 @@ public class DistributedBruteForceDetector {
 
     private static class AttemptState {
         private final NavigableMap<LocalDateTime, List<LoginEvent>> events = new TreeMap<>();
+        private final Map<String, Integer> sourceIpCounts = new HashMap<>();
         private boolean alerted;
-
-        private int count() {
-            return events.values().stream().mapToInt(List::size).sum();
-        }
+        private int failedAttempts;
 
         private LoginEvent firstEvent() {
             return events.firstEntry().getValue().get(0);

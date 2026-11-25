@@ -33,7 +33,7 @@ import './App.css'
 
 const ActivityChart = lazy(() => import('./ActivityChart.jsx'))
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '')
 
 const buildApiUrl = (path) => `${API_BASE_URL}${path}`
 
@@ -51,10 +51,14 @@ async function fetchJson(url, options = {}) {
   const response = await fetch(url, options)
 
   if (!response.ok) {
-    throw new Error(`Request failed: ${url} (HTTP ${response.status})`)
+    throw new Error(`Request failed with HTTP ${response.status}`)
   }
 
   return response.json()
+}
+
+function getErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function MetricCard({ title, value, description, icon: Icon, accent }) {
@@ -75,11 +79,17 @@ function MetricCard({ title, value, description, icon: Icon, accent }) {
   )
 }
 
-function StatusBadge({ online }) {
+function StatusBadge({ status }) {
+  const labels = {
+    checking: 'Checking API...',
+    online: 'API Connected',
+    offline: 'API Offline',
+  }
+
   return (
-    <span className={`status-badge ${online ? 'online' : 'offline'}`}>
+    <span className={`status-badge ${status}`} role="status" aria-live="polite">
       <span className="status-dot" />
-      {online ? 'API Connected' : 'API Offline'}
+      {labels[status]}
     </span>
   )
 }
@@ -103,7 +113,10 @@ function App() {
   const [rules, setRules] = useState([])
   const [loading, setLoading] = useState(true)
   const [simulating, setSimulating] = useState(false)
+  const [simulationToken, setSimulationToken] = useState('')
   const [error, setError] = useState('')
+  const [eventsError, setEventsError] = useState('')
+  const [alertsError, setAlertsError] = useState('')
   const [rulesError, setRulesError] = useState('')
   const [simulationMessage, setSimulationMessage] = useState('')
   const [lastUpdated, setLastUpdated] = useState(null)
@@ -121,42 +134,74 @@ function App() {
 
     const failures = []
     if (metricsResult.status === 'fulfilled') {
-      setMetrics(metricsResult.value)
+      const value = metricsResult.value
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        setMetrics(value)
+      } else {
+        setMetrics(null)
+        failures.push('Metrics response was not a JSON object.')
+      }
     } else {
-      failures.push(metricsResult.reason)
+      failures.push(getErrorMessage(metricsResult.reason))
     }
     if (eventsResult.status === 'fulfilled') {
-      setEvents(Array.isArray(eventsResult.value) ? eventsResult.value : [])
+      if (Array.isArray(eventsResult.value)) {
+        setEvents(eventsResult.value)
+        setEventsError('')
+      } else {
+        setEvents([])
+        setEventsError('Events response was not a JSON array.')
+        failures.push('Events response was not a JSON array.')
+      }
     } else {
-      failures.push(eventsResult.reason)
+      setEventsError(getErrorMessage(eventsResult.reason))
+      failures.push(getErrorMessage(eventsResult.reason))
     }
     if (alertsResult.status === 'fulfilled') {
-      setAlerts(Array.isArray(alertsResult.value) ? alertsResult.value : [])
+      if (Array.isArray(alertsResult.value)) {
+        setAlerts(alertsResult.value)
+        setAlertsError('')
+      } else {
+        setAlerts([])
+        setAlertsError('Alerts response was not a JSON array.')
+        failures.push('Alerts response was not a JSON array.')
+      }
     } else {
-      failures.push(alertsResult.reason)
+      setAlertsError(getErrorMessage(alertsResult.reason))
+      failures.push(getErrorMessage(alertsResult.reason))
     }
     if (rulesResult.status === 'fulfilled') {
-      setRules(Array.isArray(rulesResult.value) ? rulesResult.value : [])
-      setRulesError('')
+      if (Array.isArray(rulesResult.value)) {
+        setRules(rulesResult.value)
+        setRulesError('')
+      } else {
+        setRules([])
+        setRulesError('Detection rules response was not a JSON array.')
+        failures.push('Detection rules response was not a JSON array.')
+      }
     } else {
       setRules([])
-      setRulesError(`Detection rules unavailable: ${rulesResult.reason.message}`)
+      setRulesError(`Detection rules unavailable: ${getErrorMessage(rulesResult.reason)}`)
+      failures.push(getErrorMessage(rulesResult.reason))
     }
 
-    setError(failures.length > 0 ? failures[0].message : '')
+    setError(failures.join(' '))
     setLastUpdated(new Date())
   }, [])
 
   const loadDashboard = useCallback(async () => {
+    setLoading(true)
     try {
       await fetchJson(API.health)
       setHealth('online')
       await loadDashboardData()
     } catch (err) {
       setHealth('offline')
-      setError(
-        `${err.message}. Make sure the PurpleLoop backend is running on port 8080.`,
-      )
+      const message = getErrorMessage(err)
+      setEventsError(message)
+      setAlertsError(message)
+      setRulesError(message)
+      setError(`Backend health check failed: ${message}`)
     } finally {
       setLoading(false)
     }
@@ -192,7 +237,7 @@ function App() {
   }, [])
 
   async function runSimulation(endpoint = API.simulate, attackType = 'brute-force') {
-    if (simulating) return
+    if (simulating || !simulationToken.trim()) return
 
     setSimulating(true)
     setError('')
@@ -201,10 +246,18 @@ function App() {
     try {
       const results = await fetchJson(endpoint, {
         method: 'POST',
+        headers: {
+          Authorization: `Bearer ${simulationToken}`,
+        },
       })
 
-      const detectionResults = Array.isArray(results) ? results : []
+      if (!Array.isArray(results)) {
+        throw new Error('Simulation response was not a JSON array.')
+      }
+
+      const detectionResults = results
       setAlerts(detectionResults)
+      setAlertsError('')
 
       await loadDashboardData()
 
@@ -221,9 +274,7 @@ function App() {
       }
     } catch (err) {
       setSimulationMessage('')
-      setError(
-        `${err.message}. Check that the Java backend is running on port 8080.`,
-      )
+      setError(getErrorMessage(err))
     } finally {
       setSimulating(false)
     }
@@ -263,23 +314,44 @@ function App() {
 
         <div className="workspace-label">WORKSPACE</div>
 
-        <nav className="sidebar-nav">
-          <a className="nav-link active" href="#overview">
+        <nav className="sidebar-nav" aria-label="Dashboard sections">
+          <a
+            className="nav-link active"
+            href="#overview"
+            aria-current="page"
+            aria-label="Overview"
+            title="Overview"
+          >
             <LayoutDashboard size={18} />
             <span>Overview</span>
           </a>
 
-          <a className="nav-link" href="#events">
+          <a
+            className="nav-link"
+            href="#events"
+            aria-label="Event Telemetry"
+            title="Event Telemetry"
+          >
             <Activity size={18} />
             <span>Event Telemetry</span>
           </a>
 
-          <a className="nav-link" href="#detections">
+          <a
+            className="nav-link"
+            href="#detections"
+            aria-label="Detections"
+            title="Detections"
+          >
             <ShieldAlert size={18} />
             <span>Detections</span>
           </a>
 
-          <a className="nav-link" href="#mitre">
+          <a
+            className="nav-link"
+            href="#mitre"
+            aria-label="MITRE ATT&CK"
+            title="MITRE ATT&CK"
+          >
             <Crosshair size={18} />
             <span>MITRE ATT&CK</span>
           </a>
@@ -288,22 +360,17 @@ function App() {
         <div className="sidebar-bottom">
           <div className="environment-card">
             <div className="environment-heading">
-              <span className="environment-dot" />
-              LOCAL ENVIRONMENT
+              <span className={`environment-dot ${health}`} />
+              BACKEND STATUS
             </div>
 
             <div className="environment-row">
-              <span>Backend API</span>
-              <span>8080</span>
+              <span>Health check</span>
+              <span>{health === 'online' ? 'CONNECTED' : health === 'offline' ? 'OFFLINE' : 'CHECKING'}</span>
             </div>
 
             <div className="environment-row">
-              <span>Frontend</span>
-              <span>5173</span>
-            </div>
-
-            <div className="environment-row">
-              <span>Mode</span>
+              <span>Data mode</span>
               <span className="simulation-tag">SIMULATION</span>
             </div>
           </div>
@@ -329,7 +396,7 @@ function App() {
           </div>
 
           <div className="topbar-right">
-            <StatusBadge online={health === 'online'} />
+            <StatusBadge status={health} />
 
             <button
               className="icon-button"
@@ -360,27 +427,43 @@ function App() {
             </p>
           </div>
 
-          <div className="simulation-actions">
-            <button
-              className="primary-button"
-              onClick={() => runSimulation()}
-              disabled={simulating || health !== 'online'}
-            >
-              {simulating ? (
-                <LoaderCircle size={17} className="spin" />
-              ) : (
-                <Play size={17} fill="currentColor" />
-              )}
-              {simulating ? 'Running Simulation...' : 'Run Attack Simulation'}
-            </button>
-            <button
-              className="secondary-button"
-              onClick={() => runSimulation(API.simulateDistributed, 'distributed brute-force')}
-              disabled={simulating || health !== 'online'}
-            >
-              <Users size={16} />
-              Distributed Attack
-            </button>
+          <div className="simulation-controls">
+            <label className="simulation-token-field" htmlFor="simulation-token">
+              <span>Simulation access token</span>
+              <input
+                id="simulation-token"
+                type="password"
+                autoComplete="off"
+                aria-describedby="simulation-token-help"
+                value={simulationToken}
+                onChange={(event) => setSimulationToken(event.target.value)}
+              />
+            </label>
+            <p className="simulation-token-hint" id="simulation-token-help">
+              Required for simulations. Kept in memory only; never saved by this page.
+            </p>
+            <div className="simulation-actions">
+              <button
+                className="primary-button"
+                onClick={() => runSimulation()}
+                disabled={simulating || health !== 'online' || !simulationToken.trim()}
+              >
+                {simulating ? (
+                  <LoaderCircle size={17} className="spin" />
+                ) : (
+                  <Play size={17} fill="currentColor" />
+                )}
+                {simulating ? 'Running Simulation...' : 'Run Attack Simulation'}
+              </button>
+              <button
+                className="secondary-button"
+                onClick={() => runSimulation(API.simulateDistributed, 'distributed brute-force')}
+                disabled={simulating || health !== 'online' || !simulationToken.trim()}
+              >
+                <Users size={16} />
+                Distributed Attack
+              </button>
+            </div>
           </div>
         </section>
 
@@ -492,7 +575,7 @@ function App() {
                   <Activity size={18} />
                   <h3>Event Activity</h3>
                 </div>
-                <p>Illustrative activity distribution across the day</p>
+                <p>Login events grouped by timestamp hour across retained API history</p>
               </div>
 
               <span className="panel-badge">
@@ -511,23 +594,30 @@ function App() {
 
               <div className="chart-legend">
                 <span className="legend-dot" />
-                Event activity
+                Login events
               </div>
             </div>
 
             <div className="chart-container" ref={chartContainerRef}>
-              {shouldLoadChart && (
-                <Suspense fallback={null}>
-                  <ActivityChart />
+              {loading ? (
+                <div className="chart-empty-state" role="status">Loading event activity...</div>
+              ) : events.length === 0 ? (
+                <div className="chart-empty-state">
+                  {eventsError || 'No event activity available.'}
+                </div>
+              ) : shouldLoadChart ? (
+                <Suspense fallback={<div className="chart-empty-state" role="status">Loading chart...</div>}>
+                  <ActivityChart events={events} />
                 </Suspense>
+              ) : (
+                <div className="chart-empty-state" role="status">Preparing event chart...</div>
               )}
             </div>
 
             <div className="chart-note">
-              <AlertTriangle size={14} />
               <span>
-                Chart data is illustrative. It is not a live time-series feed
-                from the backend.
+                Counts use valid event timestamps from the retained API history;
+                timestamps are grouped by hour of day.
               </span>
             </div>
           </article>
@@ -606,18 +696,31 @@ function App() {
               </div>
             ) : (
               <div className="empty-state">
-                <ShieldCheck size={32} />
-                <h4>No alerts returned</h4>
-                <p>
-                  Run the attack simulation to test the detection engine.
-                </p>
+                {loading ? (
+                  <>
+                    <LoaderCircle size={25} className="spin" />
+                    <p>Loading alerts...</p>
+                  </>
+                ) : alertsError ? (
+                  <>
+                    <XCircle size={25} />
+                    <h4>Alerts unavailable</h4>
+                    <p>{alertsError}</p>
+                  </>
+                ) : (
+                  <>
+                    <ShieldCheck size={32} />
+                    <h4>No alerts returned</h4>
+                    <p>Run the attack simulation to test the detection engine.</p>
+                  </>
+                )}
               </div>
             )}
 
             <button
               className="secondary-button full-width"
               onClick={() => runSimulation()}
-              disabled={simulating || health !== 'online'}
+              disabled={simulating || health !== 'online' || !simulationToken.trim()}
             >
               {simulating ? (
                 <LoaderCircle size={16} className="spin" />
@@ -650,11 +753,11 @@ function App() {
                 <table>
                   <thead>
                     <tr>
-                      <th>EVENT</th>
-                      <th>SOURCE IP</th>
-                      <th>TARGET ACCOUNT</th>
-                      <th>RESULT</th>
-                      <th>TIMESTAMP</th>
+                      <th scope="col">EVENT</th>
+                      <th scope="col">SOURCE IP</th>
+                      <th scope="col">TARGET ACCOUNT</th>
+                      <th scope="col">RESULT</th>
+                      <th scope="col">TIMESTAMP</th>
                     </tr>
                   </thead>
 
@@ -716,12 +819,22 @@ function App() {
               </div>
             ) : (
               <div className="empty-state compact">
-                <Database size={25} />
-                <p>
-                  {loading
-                    ? 'Loading events...'
-                    : 'No login events available.'}
-                </p>
+                {loading ? (
+                  <>
+                    <LoaderCircle size={22} className="spin" />
+                    <p>Loading events...</p>
+                  </>
+                ) : eventsError ? (
+                  <>
+                    <XCircle size={22} />
+                    <p>Events unavailable: {eventsError}</p>
+                  </>
+                ) : (
+                  <>
+                    <Database size={25} />
+                    <p>No login events available.</p>
+                  </>
+                )}
               </div>
             )}
 
@@ -731,7 +844,7 @@ function App() {
                 Data retrieved from PurpleLoop API
               </span>
 
-              <button onClick={refreshDashboard}>
+              <button onClick={refreshDashboard} disabled={loading}>
                 <RefreshCw size={13} />
                 Refresh
               </button>
@@ -844,9 +957,9 @@ function App() {
 
         <footer className="app-footer">
           <div>
-            <span className="footer-status-dot" />
-            PURPLELOOP <span className="footer-divider">/</span> LOCAL
-            ENVIRONMENT
+            <span className={`footer-status-dot ${health}`} />
+            PURPLELOOP <span className="footer-divider">/</span> BACKEND
+            {health === 'online' ? ' CONNECTED' : health === 'offline' ? ' OFFLINE' : ' CHECKING'}
           </div>
 
           <div className="footer-right">
